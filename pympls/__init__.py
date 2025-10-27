@@ -27,15 +27,10 @@ class MPLS:
         self.Header["ExtensionDataStartAddress"], = struct.unpack(u">I", f.read(4))
         f.read(20)  # 160 reserved bits
 
-        # Parse MVC Base View Flag from misc flags at offset 0x38
-        f.seek(0x38)
-        misc_flags, = struct.unpack(u">B", f.read(1))
-        self.MVCBaseViewR = (misc_flags & 0x10) != 0  # 4th bit
-
         # =============== #
         # AppInfoPlayList #
         # =============== #
-        f.seek(0x40)  # Return to AppInfoPlayList position
+        # AppInfoPlayList starts immediately after header (40 bytes = 0x28)
         self.AppInfoPlayList = {}
         self.AppInfoPlayList["Length"], = struct.unpack(u">I", f.read(4))
         f.read(1)  # 8 reserved bits
@@ -46,6 +41,9 @@ class MPLS:
             f.read(2)  # 16 reserved bits
         self.AppInfoPlayList["UOMaskTable"], = struct.unpack(u">Q", f.read(8))
         self.AppInfoPlayList["MiscFlags"], = struct.unpack(u">H", f.read(2))
+
+        # Parse MVC Base View Flag from misc flags
+        self.MVCBaseViewR = (self.AppInfoPlayList["MiscFlags"] & 0x10) != 0
 
         # ======== #
         # PlayList #
@@ -171,19 +169,18 @@ class MPLS:
         PlayItem["ClipInformationFileName"] = f.read(5).decode("utf-8")
         PlayItem["ClipCodecIdentifier"] = f.read(4).decode("utf-8")
 
-        # Parse flags byte
-        flags_byte, = struct.unpack(u">B", f.read(1))
-        PlayItem["IsMultiAngle"] = (flags_byte >> 4) & 0x01
-        PlayItem["ConnectionCondition"] = flags_byte & 0x0F
+        # Parse flags bytes
+        flags_bytes = f.read(2)
+        tmp = self.get_bits(flags_bytes)  # first 11 bits are reserved
+        PlayItem["IsMultiAngle"] = tmp[12] == 1
+        PlayItem["ConnectionCondition"] = tmp[13:16]
 
-        # Parse multi-angle flags byte if multi-angle is enabled
+        # Parse multi-angle flags if multi-angle is enabled
         if PlayItem["IsMultiAngle"]:
+            # Read the multi-angle flags byte that follows the 2-byte flags
             multi_angle_flags, = struct.unpack(u">B", f.read(1))
             PlayItem["IsDifferentAudios"] = (multi_angle_flags >> 2) & 0x3F  # 6 bits
             PlayItem["IsSeamlessAngleChange"] = multi_angle_flags & 0x01     # 1 bit
-        else:
-            # Don't read reserved byte to match old version's file position exactly
-            pass
 
         PlayItem["RefToSTCID"], = struct.unpack(u">B", f.read(1))
         PlayItem["INTime"], = struct.unpack(u">I", f.read(4))
