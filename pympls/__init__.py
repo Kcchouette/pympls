@@ -209,6 +209,7 @@ class MPLS:
             # Parse angle clips (angles - 1 additional angles)
             for angle_index in range(number_of_angles - 1):
                 angle_clip = {}
+                angle_clip["AngleIndex"] = angle_index + 1
                 angle_clip["ClipInformationFileName"] = f.read(5).decode("utf-8")
                 angle_clip["ClipCodecIdentifier"] = f.read(4).decode("utf-8")
                 f.read(1)  # 1 reserved byte
