@@ -42,8 +42,15 @@ class MPLS:
         self.AppInfoPlayList["UOMaskTable"], = struct.unpack(u">Q", f.read(8))
         self.AppInfoPlayList["MiscFlags"], = struct.unpack(u">H", f.read(2))
 
-        # Parse MVC Base View Flag from misc flags
+        # Parse advanced Blu-ray feature flags from MiscFlags
+        # Bit 4 (0x10): MVC Base View for 3D content
         self.MVCBaseViewR = (self.AppInfoPlayList["MiscFlags"] & 0x10) != 0
+        # Bit 5 (0x20): 50Hz Content flag
+        self.Is50Hz = (self.AppInfoPlayList["MiscFlags"] & 0x20) != 0
+        # Bit 6 (0x40): Blu-ray 3D flag
+        self.Is3D = (self.AppInfoPlayList["MiscFlags"] & 0x40) != 0
+        # Bit 7 (0x80): D-BOX Motion Code flag
+        self.IsDBOX = (self.AppInfoPlayList["MiscFlags"] & 0x80) != 0
 
         # ======== #
         # PlayList #
@@ -68,7 +75,7 @@ class MPLS:
         # Calculate playlist-level AngleCount (maximum angle count from all play items)
         self.PlayList["AngleCount"] = 0
         for play_item in self.PlayList["PlayItems"]:
-            if play_item["IsMultiAngle"] and play_item["AngleCount"] > self.PlayList["AngleCount"]:
+            if play_item["IsMultiAngle"] and "AngleCount" in play_item and play_item["AngleCount"] > self.PlayList["AngleCount"]:
                 self.PlayList["AngleCount"] = play_item["AngleCount"]
 
         # ============ #
@@ -168,12 +175,12 @@ class MPLS:
         StartPosition = f.tell()
         PlayItem["ClipInformationFileName"] = f.read(5).decode("utf-8")
         PlayItem["ClipCodecIdentifier"] = f.read(4).decode("utf-8")
-
         # Parse flags bytes
         flags_bytes = f.read(2)
-        tmp = self.get_bits(flags_bytes)  # first 11 bits are reserved
-        PlayItem["IsMultiAngle"] = tmp[12] == 1
-        PlayItem["ConnectionCondition"] = tmp[13:16]
+        # Parse 2-byte flags
+        flags_int = struct.unpack(u">H", flags_bytes)[0]
+        PlayItem["IsMultiAngle"] = (flags_int & 0x0800) != 0
+        PlayItem["ConnectionCondition"] = [(flags_int >> 12) & 0x1, (flags_int >> 13) & 0x1, (flags_int >> 14) & 0x1]
 
         # Parse multi-angle flags if multi-angle is enabled
         if PlayItem["IsMultiAngle"]:
@@ -189,34 +196,31 @@ class MPLS:
 
         # Parse PlayItem flags
         playitem_flags, = struct.unpack(u">B", f.read(1))
-        PlayItem["PlayItemRandomAccessFlag"] = (playitem_flags >> 7) & 0x01
-        f.read(1)  # 7 reserved bits
-
+        PlayItem["PlayItemRandomAccessFlag"] = (playitem_flags & 0x80) != 0
         PlayItem["StillMode"], = struct.unpack(u">B", f.read(1))
         if PlayItem["StillMode"] == int(0x01):
             PlayItem["StillTime"], = struct.unpack(u">H", f.read(2))
         else:
             f.read(2)  # 16 reserved bits
-
-        # Handle multi-angle clips - only if multi-angle is enabled
-        PlayItem["AngleClips"] = []
-        PlayItem["AngleCount"] = 0
         if PlayItem["IsMultiAngle"]:
-            # Read number of angles
-            number_of_angles, = struct.unpack(u">B", f.read(1))
-            f.read(1)  # 1 reserved byte
+            # Read multi-angle information
+            b, = struct.unpack(u">B", f.read(1))
+            PlayItem["IsDifferentAudios"] = (b >> 2) & 0b111111  # 6 bits
+            PlayItem["IsSeamlessAngleChange"] = (b >> 1) & 0b1    # 1 bit
+            f.read(1)  # 8 reserved bits
+            PlayItem["NumberOfAngles"], = struct.unpack(u">B", f.read(1))
+            f.read(1)  # 8 reserved bits
 
-            # Parse angle clips (angles - 1 additional angles)
-            for angle_index in range(number_of_angles - 1):
-                angle_clip = {}
-                angle_clip["AngleIndex"] = angle_index + 1
-                angle_clip["ClipInformationFileName"] = f.read(5).decode("utf-8")
-                angle_clip["ClipCodecIdentifier"] = f.read(4).decode("utf-8")
-                f.read(1)  # 1 reserved byte
-                PlayItem["AngleClips"].append(angle_clip)
-
-            PlayItem["AngleCount"] = number_of_angles - 1
-
+            # Read angle entries
+            PlayItem["AngleClips"] = []
+            for angle_index in range(PlayItem["NumberOfAngles"] - 1):
+                AngleClip = {}
+                AngleClip["AngleIndex"] = angle_index + 1  # Angles start from 1
+                AngleClip["ClipInformationFileName"] = f.read(5).decode("utf-8")
+                AngleClip["ClipCodecIdentifier"] = f.read(4).decode("utf-8")
+                AngleClip["RefToSTCID"], = struct.unpack(u">B", f.read(1))
+                PlayItem["AngleClips"].append(AngleClip)
+            PlayItem["AngleCount"] = PlayItem["NumberOfAngles"] - 1
         PlayItem["STNTable"] = self.get_stn_table(f)
         # go to the end of the play item data
         f.seek(StartPosition + PlayItem["Length"])
@@ -227,7 +231,7 @@ class MPLS:
         STNTable["Length"], = struct.unpack(u">H", f.read(2))
         StartPosition = f.tell()
         f.read(2)  # 16 reserved bits
-        # read entry counts - separate primary and secondary streams
+        # read entry counts
         for item in [
             "PrimaryVideoStreamEntries", "PrimaryAudioStreamEntries",
             "PrimaryPGStreamEntries", "PrimaryIGStreamEntries",
@@ -236,7 +240,6 @@ class MPLS:
         ]:
             STNTable[f"NumberOf{item}"], = struct.unpack(u">B", f.read(1))
         f.read(4)  # 32 reserved bits
-
         # Parse primary streams
         for item in [
             "PrimaryVideoStreamEntries", "PrimaryAudioStreamEntries",
@@ -249,7 +252,7 @@ class MPLS:
                     "StreamAttributes": self.get_stream_attributes(f)
                 })
 
-        # Parse secondary streams separately
+        # Parse secondary streams
         for item in [
             "SecondaryAudioStreamEntries", "SecondaryVideoStreamEntries",
             "SecondaryPGStreamEntries", "DVStreamEntries"
@@ -260,7 +263,6 @@ class MPLS:
                     "StreamEntry": self.get_stream_entry(f),
                     "StreamAttributes": self.get_stream_attributes(f)
                 })
-
         # go to the end of the table data
         f.seek(StartPosition + STNTable["Length"])
         return STNTable
@@ -293,8 +295,10 @@ class MPLS:
         StartPosition = f.tell()
         if StreamAttributes["Length"]:
             StreamAttributes["StreamCodingType"], = struct.unpack(u">B", f.read(1))
-
             # Extended video stream support
+            # Supported codecs:
+            #   0x01: MPEG-1 Video, 0x02: MPEG-2 Video, 0x1B: AVC/H.264
+            #   0x20: MVC (Multi-view Video Coding), 0xEA: VC-1, 0x24: HEVC/H.265
             if StreamAttributes["StreamCodingType"] in [
                 int(0x01), int(0x02), int(0x1B), int(0x20), int(0xEA), int(0x24)
             ]:
@@ -303,20 +307,18 @@ class MPLS:
                 StreamAttributes["FrameRate"] = b & 0b1111
 
                 # Read aspect ratio for video streams (except MVC)
+                # MVC streams (0x20) don't have aspect ratio in the same position
                 if StreamAttributes["StreamCodingType"] != int(0x20):
                     b, = struct.unpack(u">B", f.read(1))
                     StreamAttributes["AspectRatio"] = b >> 4
-
-            # HEVC specific attributes
-            if StreamAttributes["StreamCodingType"] in [int(0x24)]:  # HEVC
+            if StreamAttributes["StreamCodingType"] in [int(0x24)]:  # HEVC/H.265
+                # HEVC specific attributes for HDR and color information
                 b, = struct.unpack(u">B", f.read(1))
                 StreamAttributes["DynamicRangeType"] = b >> 4
                 StreamAttributes["ColorSpace"] = b & 0b1111
                 b, = struct.unpack(u">B", f.read(1))
                 StreamAttributes["CRFlag"] = (b & 0b10000000) >> 7
                 StreamAttributes["HDRPlusFlag"] = (b & 0b01000000) >> 6
-
-            # Enhanced audio stream attributes with detailed parsing
             if StreamAttributes["StreamCodingType"] in [
                 int(0x03), int(0x04), int(0x80), int(0x81), int(0x82), int(0x83),
                 int(0x84), int(0x85), int(0x86), int(0xA1), int(0xA2)
@@ -324,22 +326,23 @@ class MPLS:
                 b, = struct.unpack(u">B", f.read(1))
                 StreamAttributes["AudioFormat"] = b >> 4
                 StreamAttributes["SampleRate"] = b & 0b1111
+
                 # Audio attributes
                 StreamAttributes["ChannelLayout"] = self.get_channel_layout(b >> 4)
                 StreamAttributes["SampleRateHz"] = self.get_sample_rate_hz(b & 0b1111)
+                # Add channel description for reporting (like in C# BDInfo)
+                StreamAttributes["ChannelDescription"] = self.get_channel_description(b >> 4)
 
                 StreamAttributes["LanguageCode"] = f.read(3).decode("utf-8")
-
-            # Graphics streams
+                # Add descriptive codec name for reporting
+                StreamAttributes["CodecAltName"] = self.get_codec_alt_name(StreamAttributes["StreamCodingType"])
             if StreamAttributes["StreamCodingType"] in [int(0x90), int(0x91)]:
                 StreamAttributes["LanguageCode"] = f.read(3).decode("utf-8")
-
             if StreamAttributes["StreamCodingType"] in [int(0x92)]:
                 char_code, = struct.unpack(u">B", f.read(1))
                 StreamAttributes["CharacterCode"] = char_code
                 StreamAttributes["CharacterCodeName"] = self.get_character_code_name(char_code)
                 StreamAttributes["LanguageCode"] = f.read(3).decode("utf-8")
-
         # go to the end of the stream attribute data
         f.seek(StartPosition + StreamAttributes["Length"])
         return StreamAttributes
@@ -391,12 +394,53 @@ class MPLS:
         }
         return character_codes.get(char_code, "Unknown")
 
-    def get_bits(self, b):
-        if not isinstance(b, bytearray) and not isinstance(b, bytes):
-            raise ValueError("pympls.MPLS.get_bits: Bad argument value")
-        return [i for sl in [
-            [((b[0] >> i) & 1) for i in range(8)
-        ] for x in b] for i in sl]
+    def get_codec_alt_name(self, stream_coding_type):
+        """Convert stream coding type to descriptive codec name"""
+        codec_names = {
+            0x01: "MPEG-1",
+            0x02: "MPEG-2",
+            0x03: "MPEG-1 Layer 2",
+            0x04: "LPCM",
+            0x80: "Dolby Digital",
+            0x81: "DTS",
+            0x82: "Dolby TrueHD",
+            0x83: "DTS-HD Master Audio",
+            0x84: "Dolby Digital Plus",
+            0x85: "DTS-HD High Resolution",
+            0x86: "DTS Express",
+            0xA1: "Dolby Digital Plus (Secondary)",
+            0xA2: "DTS-HD (Secondary)",
+            0x90: "Presentation Graphics",
+            0x91: "Interactive Graphics",
+            0x92: "Text Subtitle",
+            0x1B: "AVC",
+            0x20: "MVC",
+            0x24: "HEVC",
+            0xEA: "VC-1"
+        }
+        return codec_names.get(stream_coding_type, f"Unknown (0x{stream_coding_type:02x})")
+
+    def get_channel_description(self, layout_code):
+        """Convert channel layout code to descriptive channel name"""
+        channel_descriptions = {
+            1: "Mono",
+            3: "Stereo",
+            4: "Multi-channel",
+            5: "Multi-channel",
+            6: "Multi-channel",
+            7: "Multi-channel",
+            8: "Multi-channel",
+            9: "Multi-channel",
+            10: "Multi-channel",
+            11: "Multi-channel",
+            12: "Combo",
+            13: "Multi-channel",
+            14: "Multi-channel",
+            15: "Multi-channel"
+        }
+        return channel_descriptions.get(layout_code, "Unknown")
+
+
 
     def __repr__(self):
         return "<MPLS " + ", ".join([
@@ -405,5 +449,9 @@ class MPLS:
             f"PlayList={self.PlayList}",
             f"PlayListMarks={self.PlayListMarks}",
             f"ExtensionData={self.ExtensionData}",
-            f"MVCBaseViewR={self.MVCBaseViewR}"
+            f"MVCBaseViewR={self.MVCBaseViewR}",
+            f"Is50Hz={self.Is50Hz}",
+            f"Is3D={self.Is3D}",
+            f"IsDBOX={self.IsDBOX}",
+            f"AdvancedFeatures={self.get_advanced_features()}"
         ]) + ">"
